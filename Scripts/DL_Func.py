@@ -1,3 +1,9 @@
+import os
+import sys
+# Add Scripts folder to sys.path
+script_path = os.path.abspath(os.path.join(os.getcwd(), "..", "Scripts"))
+if script_path not in sys.path:
+    sys.path.append(script_path)
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -9,9 +15,8 @@ from skimage.metrics import structural_similarity as ssim
 from skimage.metrics import peak_signal_noise_ratio as psnr
 from torchvision import transforms
 from tqdm import tqdm
-
-from Class_Func.MultiImage_Unet import MultiImageUNet
-from Class_Func.MultiImage_Diffusion import MultiImageDiffusion
+from Scripts.Data_preprocess import plot_losses
+from Scripts.MultiAttention_Unet import MultiImage_Unet, Unet_Model
 from Scripts.Data_preprocess import process_images_into_sequences, create_dataloaders
 
 # Set device for model training and inference
@@ -31,8 +36,8 @@ def load_model(model_path='best_model.pth', device=device):
         Loaded model in evaluation mode
     """
     # Initialize the model architecture
-    unet = MultiImageUNet(in_channels=1)
-    model = MultiImageDiffusion(unet, hr_weight=0.1, device=device)
+    unet = MultiImage_Unet(in_channels=1)
+    model = Unet_Model()
     model.to(device)
     
     # Load the saved weights
@@ -94,7 +99,7 @@ def generate_samples(model, test_loader, steps=50, eta=0.0):
     return all_predictions, all_targets
 
 # Calculate SSIM and PSNR for all generated samples
-def calculate_metrics(predictions, targets):
+def calculate_metrics_dl(predictions, targets):
     """
     Calculate SSIM and PSNR metrics between predicted and target images.
     
@@ -232,7 +237,7 @@ def count_parameters(model):
 # Independent inference function for generating images with a trained model
 @torch.no_grad()
 def generate_images(
-    model: MultiImageDiffusion,   # Trained model
+    model: Unet_Model,   # Trained model
     ref_seq: torch.Tensor,        # [B,kr,1,800,800] Reference frame sequence
     pos_x: torch.LongTensor,      # Position indices of frames to generate (1-based)
     pos_r: torch.LongTensor = None, # Position indices of reference frames (1-based), auto-calculated if None
@@ -445,57 +450,139 @@ def save_generated_images(tensor, save_dir="./Images_output", filename_prefix="g
     
     return True
 
-
-def main():
+def Train_DL(model, train_loader, val_loader, num_epochs, device):
     """
-    Main function to run the evaluation pipeline on the test dataset.
+    Train a diffusion-based model on image sequences.
     
-    Steps:
-    1. Process images into sequences
-    2. Create dataloaders
-    3. Load the trained model
-    4. Generate predictions on test data
-    5. Calculate quality metrics
-    6. Plot and save results
+    Args:
+        model: The Unet_Model instance to train
+        train_loader: DataLoader for training data containing tuples of (reference_images, target_sequence)
+        val_loader: DataLoader for validation data
+        num_epochs: Number of training epochs
+        device: Device to train on (cuda or cpu)
+        
+    Returns:
+        Trained model with best weights loaded
     """
-    # Process images into sequences
-    print("Processing images into sequences...")
-    reference_images, sequence_images = process_images_into_sequences('Dataset_images')
-    
-    # Create dataloaders with a fixed test ratio
-    print("Creating dataloaders...")
-    train_loader, val_loader, test_loader = create_dataloaders(
-        reference_images, 
-        sequence_images,
-        batch_size=2, 
-        train_ratio=0.8, 
-        val_ratio=0.1, 
-        test_ratio=0.1, 
-        shuffle=True, 
-        num_workers=0
-    )
-    
-    # Load the trained model
-    print("Loading model...")
-    model = load_model()
-    
-    # Generate predictions on the test set
-    print("Generating predictions...")
-    predictions, targets = generate_samples(model, test_loader)
-    
-    # Calculate metrics
-    print("Calculating SSIM and PSNR metrics...")
-    ssim_scores, psnr_scores = calculate_metrics(predictions, targets)
-    
-    # Plot and save metrics
-    print("Plotting and saving results...")
-    plot_metrics(ssim_scores, psnr_scores)
-    
-    # Save example comparisons
-    print("Saving example image comparisons...")
-    save_example_comparisons(predictions, targets)
-    
-    print("Evaluation complete!")
+    # For recording training and validation losses
+    train_losses = []
+    val_losses = []
 
-if __name__ == "__main__":
-    main() 
+    # For tracking the best model
+    best_val_loss = float('inf')
+    best_model_epoch = -1
+    best_model_path = 'best_model.pth'
+
+    # Training loop
+    for epoch in range(num_epochs):
+        # Training phase
+        model.train()  # Set model to training mode
+        epoch_loss = 0.0  # Record total training loss for each epoch
+        
+        for i, (ref_hr, x_seq_hr) in enumerate(train_loader):
+            # Move data to device
+            x_seq_hr = x_seq_hr.to(device)  # [B, kx, 1, H_hr, W_hr] - Input sequence
+            ref_hr = ref_hr.to(device)      # [B, kr, 1, H_hr, W_hr] - Reference images
+            
+            # Get data dimensions
+            B, kx_size, C, H_hr, W_hr = x_seq_hr.shape
+            _, kr, _, _, _ = ref_hr.shape    # Get number of reference frames
+
+            # Resize images to processing size 800x800
+            x800 = F.interpolate(
+                x_seq_hr.view(-1, 1, H_hr, W_hr),  # Reshape to [B*kx, 1, H_hr, W_hr] for interpolation
+                size=(800, 800),                   # Target size
+                mode='bilinear',                   # Bilinear interpolation
+                align_corners=False                # Don't align corners
+            ).view(B, kx_size, 1, 800, 800)        # Reshape back to [B, kx, 1, 800, 800]
+            
+            ref800 = F.interpolate(
+                ref_hr.view(-1, 1, H_hr, W_hr),    # Reshape to [B*kr, 1, H_hr, W_hr] for interpolation
+                size=(800, 800),                   # Target size
+                mode='bilinear',                   # Bilinear interpolation
+                align_corners=False                # Don't align corners
+            ).view(B, kr, 1, 800, 800)             # Reshape back to [B, kr, 1, 800, 800]
+            
+            # Position indices for time steps in diffusion model
+            pos_x = torch.tensor([2, 4, 6, 8, 10], dtype=torch.long).to(device)  # kx=5
+            
+            # Forward propagation to calculate loss
+            loss = model.p_losses(x800, ref800, pos_x, x_seq_hr)  # Calculate dual-scale loss
+            
+            # Backpropagation and optimization
+            optimizer = model.optimizer  # Get the optimizer from model
+            optimizer.zero_grad()        # Clear gradients
+            loss.backward()              # Backpropagation
+            optimizer.step()             # Update parameters
+            
+            epoch_loss += loss.item()  # Accumulate batch loss
+            
+            # Print loss every 10 batches
+            if i % 10 == 0:
+                print(f"Training epoch {epoch:02d}, batch {i:04d} | Dual-scale loss = {loss.item():.5f}")
+        
+        # Calculate average training loss
+        avg_train_loss = epoch_loss / len(train_loader)
+        train_losses.append(avg_train_loss)
+        
+        # Validation phase
+        model.eval()  # Set model to evaluation mode
+        val_loss = 0.0
+        
+        with torch.no_grad():  # Don't calculate gradients
+            for i, (ref_hr, x_seq_hr) in enumerate(val_loader):
+                # Move data to device
+                x_seq_hr = x_seq_hr.to(device)
+                ref_hr = ref_hr.to(device)
+                
+                # Get data dimensions
+                B, kx_size, C, H_hr, W_hr = x_seq_hr.shape
+                _, kr, _, _, _ = ref_hr.shape  # Get number of reference frames
+                
+                # Resize images to processing size 800x800
+                x800 = F.interpolate(
+                    x_seq_hr.view(-1, 1, H_hr, W_hr),
+                    size=(800, 800),
+                    mode='bilinear',
+                    align_corners=False
+                ).view(B, kx_size, 1, 800, 800)
+                
+                ref800 = F.interpolate(
+                    ref_hr.view(-1, 1, H_hr, W_hr),
+                    size=(800, 800),
+                    mode='bilinear',
+                    align_corners=False
+                ).view(B, kr, 1, 800, 800)
+                
+                # Position indices
+                pos_x = torch.tensor([2, 4, 6, 8, 10], dtype=torch.long).to(device)
+                
+                # Calculate validation loss
+                loss = model.p_losses(x800, ref800, pos_x, x_seq_hr)
+                val_loss += loss.item()
+        
+        # Calculate average validation loss
+        avg_val_loss = val_loss / len(val_loader)
+        val_losses.append(avg_val_loss)
+        
+        # Save best-performing model
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            best_model_epoch = epoch
+            torch.save(model.state_dict(), best_model_path)
+            print(f"Found better model! Epoch {epoch:02d} | Validation loss = {avg_val_loss:.5f}")
+        
+        # Print average loss for each epoch (training and validation)
+        print(f"Training epoch {epoch:02d} | Training loss = {avg_train_loss:.5f} | Validation loss = {avg_val_loss:.5f}")
+        
+        # Plot and save loss curves after each epoch
+        plot_losses(train_losses, val_losses, epoch)
+
+    # Record best model information after training
+    print(f"\nTraining completed! Best model at epoch {best_model_epoch:02d} with validation loss of {best_val_loss:.5f}")
+    print(f"Best model saved to {best_model_path}")
+
+    # Load the best model for subsequent use
+    model.load_state_dict(torch.load(best_model_path))
+    
+    return model
