@@ -102,6 +102,45 @@ The deep learning approach uses custom UNet architectures for image interpolatio
 The project implements several neural network architectures:
 - `MultiImageUNet`: A UNet architecture adapted for multiple input images
 
+### UNet Architecture
+
+The project implements a custom UNet architecture designed specifically for image interpolation:
+
+#### Basic UNet 
+The standard UNet model consists of:
+- An encoder path that downsamples the input image through multiple layers
+- A decoder path that upsamples the features back to the original resolution
+- Skip connections between corresponding encoder and decoder layers
+
+#### MultiImageUNet
+A specialized UNet architecture for processing multiple consecutive frames:
+
+- **Input Processing**:
+  - Takes multiple input frames and reference frames
+  - Utilizes self-attention mechanisms to process temporal relationships
+
+- **Encoder Path**:
+  - Multiple encoder layers with cross-attention modules
+  - Each encoder layer includes downsampling and channel expansion
+  - Features are progressively reduced in spatial dimensions but increased in channel depth
+
+- **Decoder Path**:
+  - Decoder layers with skip connections from the encoder
+  - Upsampling through transposed convolutions
+  - Gradual restoration of spatial dimensions while reducing channel depth
+
+- **Special Features**:
+  - Cross-attention mechanisms for relating features across frames
+  - Self-attention for capturing temporal information
+  - Final convolution layers to generate the interpolated frame
+
+#### UnetModel
+The main UNet implementation that builds upon MultiImageUNet:
+- Handles image resizing for consistent processing
+- Includes a final upsampling layer to restore original resolution
+- Applies additional convolutions for enhancing quality of the final output
+
+Models are automatically downloaded from Hugging Face when needed. 
 
 #### Training
 The deep learning training process:
@@ -189,43 +228,3 @@ psnr_value = psnr(reference_image, predicted_image, data_range=255)
 The project uses both ML and DL models:
 - Random Forest regressor for Machine Learning approach
 - UNet architectures for Deep Learning approach
-
-### UNet Architecture
-
-The project implements a custom UNet architecture designed specifically for image interpolation:
-
-#### Basic UNet 
-The standard UNet model consists of:
-- An encoder path that downsamples the input image through multiple layers
-- A decoder path that upsamples the features back to the original resolution
-- Skip connections between corresponding encoder and decoder layers
-
-#### MultiImageUNet
-A specialized UNet architecture for processing multiple consecutive frames:
-
-- **Input Processing**:
-  - Takes multiple input frames and reference frames
-  - Utilizes self-attention mechanisms to process temporal relationships
-
-- **Encoder Path**:
-  - Multiple encoder layers with cross-attention modules
-  - Each encoder layer includes downsampling and channel expansion
-  - Features are progressively reduced in spatial dimensions but increased in channel depth
-
-- **Decoder Path**:
-  - Decoder layers with skip connections from the encoder
-  - Upsampling through transposed convolutions
-  - Gradual restoration of spatial dimensions while reducing channel depth
-
-- **Special Features**:
-  - Cross-attention mechanisms for relating features across frames
-  - Self-attention for capturing temporal information
-  - Final convolution layers to generate the interpolated frame
-
-#### UnetModel
-The main UNet implementation that builds upon MultiImageUNet:
-- Handles image resizing for consistent processing
-- Includes a final upsampling layer to restore original resolution
-- Applies additional convolutions for enhancing quality of the final output
-
-Models are automatically downloaded from Hugging Face when needed. 
